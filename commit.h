@@ -51,3 +51,5 @@ int head_read(ObjectID *id_out);
 int head_update(const ObjectID *new_commit);
 
 #endif // COMMIT_H
+
+// auto change 7
