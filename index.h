@@ -54,3 +54,5 @@ IndexEntry* index_find(Index *index, const char *path);
 int index_status(const Index *index);
 
 #endif // INDEX_H
+
+// auto change 721
