@@ -91,4 +91,141 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         return 0;
     }
 
-    
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id_out, hex);
+
+    char shard[512];
+    snprintf(shard, sizeof(shard), "%s/%.2s", OBJECTS_DIR, hex);
+
+    if (mkdir(PES_DIR, 0755) != 0 && errno != EEXIST) goto fail;
+    if (mkdir(OBJECTS_DIR, 0755) != 0 && errno != EEXIST) goto fail;
+    if (mkdir(shard, 0755) != 0 && errno != EEXIST) goto fail;
+
+    char tmp[640];
+    if (snprintf(tmp, sizeof(tmp), "%s/tmp.XXXXXX", shard) >= (int)sizeof(tmp))
+        goto fail;
+    int fd = mkstemp(tmp);
+    if (fd < 0) goto fail;
+
+    ssize_t w = write(fd, buf, total);
+    if (w != (ssize_t)total) {
+        close(fd);
+        unlink(tmp);
+        goto fail;
+    }
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(tmp);
+        goto fail;
+    }
+    if (close(fd) != 0) {
+        unlink(tmp);
+        goto fail;
+    }
+
+    char final_path[512];
+    object_path(id_out, final_path, sizeof(final_path));
+    if (rename(tmp, final_path) != 0) {
+        unlink(tmp);
+        goto fail;
+    }
+
+    int dfd = open(shard, O_RDONLY);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
+
+    free(buf);
+    return 0;
+
+fail:
+    free(buf);
+    return -1;
+}
+
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
+    if (!id || !type_out || !data_out || !len_out) return -1;
+
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return -1; }
+    rewind(f);
+
+    unsigned char *raw = malloc((size_t)sz);
+    if (!raw) { fclose(f); return -1; }
+
+    size_t got = fread(raw, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) {
+        free(raw);
+        return -1;
+    }
+
+    ObjectID computed;
+    compute_hash(raw, (size_t)sz, &computed);
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) {
+        free(raw);
+        return -1;
+    }
+
+    void *nul = memchr(raw, '\0', (size_t)sz);
+    if (!nul) {
+        free(raw);
+        return -1;
+    }
+
+    char *sp = memchr(raw, ' ', (char *)nul - (char *)raw);
+    if (!sp) {
+        free(raw);
+        return -1;
+    }
+
+    size_t type_len = (size_t)(sp - (char *)raw);
+    if (type_len >= 64) {
+        free(raw);
+        return -1;
+    }
+    char type_buf[64];
+    memcpy(type_buf, raw, type_len);
+    type_buf[type_len] = '\0';
+
+    ObjectType ot;
+    if (parse_type_string(type_buf, &ot) != 0) {
+        free(raw);
+        return -1;
+    }
+    *type_out = ot;
+
+    errno = 0;
+    char *endp = NULL;
+    unsigned long long data_len_ull = strtoull((char *)sp + 1, &endp, 10);
+    if (errno != 0 || endp != nul) {
+        free(raw);
+        return -1;
+    }
+
+    unsigned char *payload = (unsigned char *)nul + 1;
+    size_t payload_off = (size_t)(payload - raw);
+    if (payload_off + data_len_ull > (size_t)sz) {
+        free(raw);
+        return -1;
+    }
+    *len_out = (size_t)data_len_ull;
+
+    void *out = malloc(*len_out);
+    if (!out) {
+        free(raw);
+        return -1;
+    }
+    memcpy(out, payload, *len_out);
+    free(raw);
+    *data_out = out;
+    return 0;
+}
